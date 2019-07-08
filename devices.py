@@ -4,6 +4,9 @@ import subprocess
 from flask import Flask, jsonify
 from threading import Timer
 
+app = Flask(__name__)
+devices = {}
+
 class RepeatedTimer(object):
     def __init__(self, interval, function, *args, **kwargs):
         self._timer     = None
@@ -29,45 +32,51 @@ class RepeatedTimer(object):
         self._timer.cancel()
         self.is_running = False
 
-app = Flask(__name__)
-nmap_output = 'devices.txt'
-devices = {}
-
 def nmap_job(ip_mask):
-    global devices
-    command = 'sudo nmap -sn {} > {}'.format(ip_mask, nmap_output)
-    print(command)
-    subprocess.run([command], shell = True)
-    try:
-        devices = update_connected_devs()
-    except IOError:
-        print("Error opening file: {}".format(nmap_output))
+    command = 'sudo nmap -sn {}'.format(ip_mask)
+    nmap = subprocess.run([command], shell = True, stdout = subprocess.PIPE)
+    nmap_output = nmap.stdout.decode("utf-8")
+    update_connected_devs(nmap_output)    
 
 def get_ip4_mask():
     iplist = [ifaddresses(face)[AF_INET][0]["addr"] for face in interfaces() if AF_INET in ifaddresses(face)]
     ip_mask = '.'.join(iplist[1].split('.')[:3]) + '.0/24'
     return ip_mask
 
-def update_connected_devs():
+def update_connected_devs(nmap_output):
+    global devices
     con_devices = {}
-    with open(nmap_output, 'r') as f:
-        for line in f:
-            # if 'Starting Nmap' in line:
-            #     date_time = ' '.join((line.split()[7:]))
-                # print('Time updated: {}'.format(date_time))
-            if 'Nmap scan report for' in line:
-                ip_addr = line.split()[4]
-            elif 'MAC Address:' in line:
-                mac_addr = str(line.split()[2])
+    for line in nmap_output.splitlines():
+        # if 'Starting Nmap' in line:
+        #     date_time = ' '.join((line.split()[7:]))
+            # print('Time updated: {}'.format(date_time))
+        if 'Nmap scan report for' in line:
+            ip_addr = line.split()[4]
+        elif 'MAC Address:' in line:
+            mac_addr = str(line.split()[2])
+            con_devices[mac_addr] = {}
+            if mac_addr in devices:
+                devices[mac_addr]['uptime'] += 1
+                devices[mac_addr]['downtime'] = 0
+            else: 
                 host_name = ' '.join(line.split()[3:])[1:-1]
-                con_devices[mac_addr] = {'ip': ip_addr, 'host': host_name}
-    return con_devices
+                devices[mac_addr] = {'ip': ip_addr, 'host': host_name, 'uptime': 1, 'downtime': 0}
+    offline_devs = set(devices.keys()) ^ set(con_devices.keys())
+    for dev in offline_devs:
+        devices[dev]['uptime'] = 0
+        if 'downtime' in devices[dev]:
+            devices[dev]['downtime'] += 1
+        else:
+            devices[dev]['downtime'] = 1
 
-ip_mask = get_ip4_mask()
-nmap = RepeatedTimer(60, nmap_job, ip_mask)
+def main():
+    ip_mask = get_ip4_mask()
+    nmap = RepeatedTimer(30, nmap_job, ip_mask)
+    app.run('0.0.0.0', port = 5000)
 
 @app.route('/devices', methods=['GET'])
 def get_devices():
     return jsonify(devices), 200
 
-app.run('0.0.0.0', port = 5000)
+if __name__ == "__main__":
+    main()
